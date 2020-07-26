@@ -1,0 +1,1 @@
+python3 main_cifar.py --arch="resnet164_lst_cifar" --output_dir="ResNet164_LSTNet_CIFAR100" --ctype=100
