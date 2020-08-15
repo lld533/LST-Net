@@ -60,9 +60,9 @@ parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--ctype', default=100, type=int, help='100(CIFAR-100, default) or 10(CIFAR-10)')
 parser.add_argument('--output_dir', default='./', type=str, help='where to save the model (default: current directory)')
-parser.add_argument('--lst_k',default=3,type=int, help='kernel size of a bottleneck (default: 3)')
-parser.add_argument('--lst_a',default=2,type=int, help='kernel size of a bottleneck (default: 2)')
-parser.add_argument('--tau', default=1e-4, type=float, help='HT/ST threshold (default:1e-4)')
+parser.add_argument('--lst_k',default=3,type=int, help='kernel size used in T_s (default: 3)')
+parser.add_argument('--lst_a',default=2,type=int, help='multiplication rate used in T_s (default: 2)')
+parser.add_argument('--tau', default=1e-4, type=float, help='threshold for ST (default:1e-4)')
 
 best_prec1 = 0
 
