@@ -12,15 +12,15 @@ import torch.distributed as dist
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import vision.torchvision.transforms as transforms
-from . import resnet_lst_cifar as rr
+import torchvision.transforms as transforms
+import resnet_lst_cifar as rr
 from torchvision.datasets import CIFAR100, CIFAR10
 
 model_names = sorted(name for name in rr.__dict__
     if name.islower() and not name.startswith("__")
     and callable(rr.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
+parser = argparse.ArgumentParser(description='PyTorch CIFAR Training for LST-Net')
 parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet164_lst_cifar',
                     choices=model_names,
                     help='model architecture: ' +
@@ -204,14 +204,13 @@ def main():
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
-        must_save = (epoch + 1) == 80
         save_checkpoint({
             'epoch': epoch + 1,
             'arch': args.arch,
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
             'optimizer' : optimizer.state_dict(),
-        }, is_best, args.output_dir, must_save=must_save)
+        }, is_best, args.output_dir)
 
     fid_train.close()
     fid_val.close()
@@ -322,19 +321,10 @@ def validate(val_loader, model, criterion, fid_val):
     return top1.avg
 
 
-def save_checkpoint(state, is_best, output_dir, filename='checkpoint.pth.tar', must_save=False):
+def save_checkpoint(state, is_best, output_dir, filename='checkpoint.pth.tar'):
     torch.save(state, os.path.join(output_dir, filename))
     if is_best:
         shutil.copyfile(os.path.join(output_dir, filename), os.path.join(output_dir, 'model_best.pth.tar'))
-
-    if must_save:
-        while True:
-            i = 0
-            if not(os.path.exists(os.path.join(output_dir, 'model_must_save_%d.pth.tar'%i))):
-                shutil.copyfile(os.path.join(output_dir, filename), os.path.join(output_dir, 'model_must_save_%d.pth.tar'%i))
-                break
-            i = i + 1
-
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -352,12 +342,6 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-
-
-def fix_learning_rate(optimizer, lr):
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
 
 def adjust_learning_rate(optimizer, epoch):
     """Adjust the learning rate"""

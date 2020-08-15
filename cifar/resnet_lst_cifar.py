@@ -12,31 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from .dct import dct_init
-
-class ST(nn.Module):
-    def __init__(self, tau=1e-4):
-        super(ST,self).__init__()
-        self.tau = tau
-
-    def forward(self, x):
-        y = torch.where(torch.abs(x) < self.tau,
-                        torch.zeros_like(x),
-                        torch.where(x < 0,
-                                    x + self.tau,
-                                    x - self.tau))
-        return y
-
-class HT(nn.Module):
-    def __init__(self, tau=1e-4):
-        super(HT,self).__init__()
-        self.tau = tau
-
-    def forward(self, x):
-        y = torch.where(torch.abs(x) < self.tau,
-                        torch.zeros_like(x),
-                        x)
-        return y
+from dct import dct_init
 
 class LST2Block(nn.Module):
     expansion = 1
@@ -108,11 +84,7 @@ class LST2Block(nn.Module):
 
         y2 = F.conv2d(y2, self.weight2)
         y2 = self.bn2(y2)
-        y2 = torch.where(torch.abs(y2) < self.tau,
-                         torch.zeros_like(y2),
-                         torch.where(y2 < 0,
-                                     y2 + self.tau,
-                                     y2 - self.tau))
+        y2 = F.softshrink(y2, self.tau)
 
 
         w = self.weight3.repeat(self.base_chnls, 1, 1, 1)
@@ -124,11 +96,8 @@ class LST2Block(nn.Module):
         y2 = self.bn3(y2)
 
         y = y1 + y2
-        y = torch.where(torch.abs(y) < self.tau,
-                        torch.zeros_like(y),
-                        torch.where(y < 0,
-                                    y + self.tau,
-                                    y - self.tau))
+        y = F.softshrink(y, self.tau)
+        
         return y
     
 
