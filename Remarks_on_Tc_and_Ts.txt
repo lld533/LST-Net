@@ -1,0 +1,38 @@
+One may notice that T_s always comes after T_c in a LST-I or LST-II bottleneck. One may ask why our ``resize, channel, spatial'' is better than ``resize, spatial, channel'', \ie, swapping the position of T_s and T_c. Actually, we receive similar questions from one anonymous reviewer during our rebuttal period. Due to page limit, we fail to make it clear in our paper. Below, we present our response to the associate questions to improve understanding.
+
+
+Q1. More explanation / Implementation of $T_r$ and $T_s$.
+
+A1. To make the implementation clear, let's present the pseudo-code of LST-II in PyTorch:
+
+def __init__(ci,co,s,a,stride=1):
+#ci: input channels
+#co: output channels
+#s: kernel size
+#a: hyper parameter used in T_s, see p.6
+#stride: stride in spatial domain
+  # Define weights
+  c = ci//a//a
+  assert c*a*a == co #see our discussion in p.9
+  Tr = nn.Conv2d(ci,c,1,bias=False) #T_r
+  wc = Parameter(Tensor(c,c,1,1)) # weight of T_c, organized as (output channel, input channel, kernel height, kernel width) in PyTorch
+  ws = Parameter(Tensor(a*a,1,s,s)) #weight of T_s, where 1==c//c (input channel // #groups) is required by PyTorch
+  bnr,bnc,bns = BN(c),BN(c),BN(co)
+  
+  # Init weights
+  kaiming_init(Tr.weights)
+  wc=dct2(c,c).expand_as(wc)
+  ws=K_prod(dct2(a,s).view(a,1,1,s),dct2(a,s).view(a,1,s,1)) #Eq.4
+
+def forward(x):
+  y=F.relu(bnr(Tr(x))) #T_r, PWConv
+  y=ST(bnc(F.conv2d(y,wc))) #T_c, PWConv
+  y=bns(F.conv2d(y,ws.repeat(c,1,1,1),stride=stride,padding=(s-1)//2,groups=c)) #T_s, DWConv
+  y+=D(x) #Eq.7
+  return y
+
+The transforms T_s, T_c and T_r have different purposes. T_s & T_c aim to remove feature redundancy in spatial and channel domains. We initialize them by 2D-DCT and update them in a data-driven manner. In contrast, the goals of T_r are: (1) to learn to adaptively assign weights to the intermediate results after T_s and T_c (compared to Conv2d, all pixels in the same channel are equally weighted); and (2) to resize (satisfy) #channel at different layers of a CNN.
+
+Q2. Why Resize, Channel, Spatial is better than Resize, Spatial, Channel?
+
+A2. #Param & overhead of an LST bottleneck depend mainly on T_c, not T_s (unless the spatial size is much larger than #channel, rarely happen in modern architectures). If T_c is conducted before T_s, #channel (output of T_c and input of T_s) equals to ci//a//a (see our pseudo-code). On the contrary, #channel (output of T_s and input of T_c) will be enlarged by a*a times if T_c is performed after T_s, leading to huge number of parameters and very heavy overhead.
