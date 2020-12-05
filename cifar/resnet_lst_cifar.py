@@ -14,6 +14,93 @@ import torch.nn.functional as F
 import math
 from dct import dct_init
 
+#LST-I bottleneck
+class LST1Block(nn.Module):
+    expansion = 1
+
+    def __init__(self, in_chnls, out_chnls, stride=1, downsample=None, k=3, a=2, tau=1e-4):
+        self.stride = stride
+        self.in_chnls = in_chnls
+        self.out_chnls = out_chnls
+        self.k = k
+        self.a = max(2, min(a, k))
+        self.padding = (self.k-1) // 2 #padding='same'
+        self.tau = tau
+
+        super(LST1Block, self).__init__()
+        self.downsample = downsample
+
+        self.base_chnls = self.out_chnls // self.a // self.a
+
+        self.conv1 = nn.Conv2d(self.in_chnls, self.base_chnls, 1, bias=False)
+        self.weight2 = nn.Parameter(torch.FloatTensor(self.base_chnls, self.base_chnls, 1, 1))
+        self.weight3 = nn.Parameter(torch.FloatTensor(self.a*self.a,1,self.k,self.k))
+
+        self.bn1 = nn.BatchNorm2d(self.base_chnls)
+        self.bn2 = nn.BatchNorm2d(self.base_chnls)
+        self.bn3 = nn.BatchNorm2d(self.out_chnls)
+        self.activation = nn.ReLU(inplace=True)
+
+        self.init_param()
+
+    def init_param(self):
+        # weight2
+        self.weight2.data = dct_init(self.base_chnls, self.base_chnls).view(self.weight2.shape)
+
+        # weight3
+        part_a = dct_init(self.a, self.k).view(self.a, 1, 1, self.k)
+        part_b = torch.transpose(part_a.clone(), -1, -2)
+        part_a = part_a.repeat(1,1,self.k,1)
+        part_b = part_b.repeat(1,1,1,self.k)
+
+        idx = 0
+        for i in range(self.a):
+            for j in range(self.a):
+                self.weight3.data[idx,:,:,:] = part_a[i,:,:,:] * part_b[j,:,:,:]
+                idx += 1
+
+        # bn1
+        self.bn1.weight.data.fill_(1)
+        self.bn1.bias.data.zero_()
+
+        # bn2
+        self.bn2.weight.data.fill_(1)
+        self.bn2.bias.data.zero_()
+
+        # bn3
+        self.bn3.weight.data.fill_(1)
+        self.bn3.bias.data.zero_()
+
+
+    def forward(self, x):
+        residual = x
+        y1 = residual
+
+        if self.downsample is not None:
+            y1 = self.downsample(residual)
+
+        y2 = self.conv1(residual)
+        y2 = self.bn1(y2)
+        y2 = self.activation(y2)
+
+        y2 = F.conv2d(y2, self.weight2)
+        y2 = self.bn2(y2)
+        y2 = F.softshrink(y2, self.tau)
+
+        w = self.weight3.repeat(self.base_chnls, 1, 1, 1)
+        y2 = F.conv2d(y2,
+                      w,
+                      stride=self.stride,
+                      padding=self.padding,
+                      groups=self.base_chnls)
+        y2 = self.bn3(y2)
+
+        y = y1 + y2
+        y = F.softshrink(y, self.tau)
+        
+        return y
+
+#LST-II bottleneck (default bottleneck used to construct LST-Net under ResNet/WRN architecture)
 class LST2Block(nn.Module):
     expansion = 1
 
@@ -101,6 +188,75 @@ class LST2Block(nn.Module):
         return y
     
 
+# Candidate Impl of LST-Net under ResNet architecture.
+class ResNet_LST_Cifar_Candidate(nn.Module):
+    init_width = 32
+    init_height= 32
+
+    def __init__(self, block, layers, num_classes=10, k=3, a=2, tau=1e-4):
+        super(ResNet_LST_Cifar_Candidate, self).__init__()
+        self.k = k
+        self.a = a
+        self.tau = tau
+        self.inplanes = 16
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.layer1 = self._make_layer(block, 16, layers[0])
+        self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
+
+        self.avgpool = nn.AvgPool2d(8, stride=1)
+        self.fc = nn.Linear(64, num_classes)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        # PWConv is used in downsample
+        if stride != 1 or self.inplanes != planes:
+            downsample = nn.Sequential(nn.Conv2d(self.inplanes, planes,1,stride=stride,bias=False),
+                                       nn.BatchNorm2d(planes))
+
+        layers = []
+        layers.append(block(self.inplanes,
+                            planes,
+                            stride,
+                            downsample,
+                            tau=self.tau,
+                            k=self.k,
+                            a=self.a))
+
+        self.inplanes = planes
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, self.inplanes, tau=self.tau, k=self.k, a=self.a))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
+
+# Genuine Implementation of LST-Net under ResNet architecture.
 class ResNet_LST_Cifar(nn.Module):
     init_width = 32
     init_height= 32
@@ -116,11 +272,10 @@ class ResNet_LST_Cifar(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
         self.layer1 = self._make_layer(block, 16, layers[0])
-
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
-
         self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
 
+        # handler is used to down-scale #channels with negligible cost
         self.handler = nn.Sequential(nn.Conv2d(64*a*a, 64, 1, bias=False),
                                      nn.BatchNorm2d(64),
                                      nn.ReLU(inplace=True))
@@ -139,6 +294,7 @@ class ResNet_LST_Cifar(nn.Module):
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
+        # DWConv is used in downsample
         if stride != 1 or self.inplanes != planes * self.a * self.a:
             downsample = nn.Sequential(nn.Conv2d(self.inplanes, planes*self.a*self.a,1,stride=stride,bias=False, groups=self.inplanes),
                                        nn.BatchNorm2d(planes*self.a*self.a))
@@ -243,13 +399,10 @@ class WRN_LST_Cifar(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
 
-        print('before handler', x.shape)
         x = self.handler(x)
-        print('after handler', x.shape)
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        print('after gap', x.shape)
         x = self.fc(x)
 
         return x
@@ -287,6 +440,7 @@ def wrn40_8_lst_cifar(k=3,a=2, **kwargs):
     replica = 2
     return WRN_LST_Cifar(LST2Block, [x*replica for x in [6,6,6]], width=8, k=k, a=a, **kwargs)
 
+# LST-Net under ResNet with LST-II bottleneck (genuine implementation)
 def resnet20_lst_cifar(k=3, a=2, **kwargs):
     replica = 2
     model = ResNet_LST_Cifar(LST2Block, [x*replica for x in [3,3,3]], k=k, a=a, **kwargs)
@@ -320,4 +474,11 @@ def resnet164_lst_cifar(k=3, a=2, **kwargs):
 def resnet1202_lst_cifar(k=3, a=2, **kwargs):
     replica = 2
     model = ResNet_LST_Cifar(LST2Block, [x*replica for x in [200,200,200]], k=k, a=a, **kwargs)
+    return model
+
+
+# LST-Net under ResNet with LST-I bottleneck (candidate implementation)
+def resnet18_lst_cifar_candidate(k=3, a=2, **kwargs):
+    replica = 2
+    model = ResNet_LST_Cifar_Candidate(LST1Block, [x*replica for x in [3,3,3]], k=k, a=a, **kwargs)
     return model
