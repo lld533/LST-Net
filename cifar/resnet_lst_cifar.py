@@ -30,46 +30,45 @@ class LST1Block(nn.Module):
         super(LST1Block, self).__init__()
         self.downsample = downsample
 
-        self.base_chnls = self.out_chnls // self.a // self.a
-
-        self.conv1 = nn.Conv2d(self.in_chnls, self.base_chnls, 1, bias=False)
-        self.weight2 = nn.Parameter(torch.FloatTensor(self.base_chnls, self.base_chnls, 1, 1))
-        self.weight3 = nn.Parameter(torch.FloatTensor(self.a*self.a,1,self.k,self.k))
-
-        self.bn1 = nn.BatchNorm2d(self.base_chnls)
-        self.bn2 = nn.BatchNorm2d(self.base_chnls)
+        self.weight1 = nn.Parameter(torch.FloatTensor(self.out_chnls, self.in_chnls, 1, 1))
+        self.weight2 = nn.Parameter(torch.FloatTensor(self.a*self.a,1,self.k,self.k))
+        self.conv3 = nn.Conv2d(self.out_chnls*self.a*self.a, self.out_chnls, 1, bias=False)
+    
+        self.bn1 = nn.BatchNorm2d(self.out_chnls)
+        self.bn2 = nn.BatchNorm2d(self.out_chnls * self.a * self.a)
         self.bn3 = nn.BatchNorm2d(self.out_chnls)
         self.activation = nn.ReLU(inplace=True)
 
         self.init_param()
 
     def init_param(self):
+        # weight1
+        self.weight1.data = dct_init(self.out_chnls, self.in_chnls).view(self.weight1.shape).contiguous()
+    
         # weight2
-        self.weight2.data = dct_init(self.base_chnls, self.base_chnls).view(self.weight2.shape)
-
-        # weight3
-        part_a = dct_init(self.a, self.k).view(self.a, 1, 1, self.k)
+        part_a = dct_init(self.a, self.k).view(self.a, 1, 1, self.k).contiguous()
         part_b = torch.transpose(part_a.clone(), -1, -2)
         part_a = part_a.repeat(1,1,self.k,1)
         part_b = part_b.repeat(1,1,1,self.k)
-
+    
         idx = 0
         for i in range(self.a):
             for j in range(self.a):
-                self.weight3.data[idx,:,:,:] = part_a[i,:,:,:] * part_b[j,:,:,:]
+                self.weight2.data[idx,:,:,:] = part_a[i,:,:,:] * part_b[j,:,:,:]
                 idx += 1
-
+    
         # bn1
         self.bn1.weight.data.fill_(1)
         self.bn1.bias.data.zero_()
-
+    
         # bn2
         self.bn2.weight.data.fill_(1)
         self.bn2.bias.data.zero_()
-
+    
         # bn3
         self.bn3.weight.data.fill_(1)
         self.bn3.bias.data.zero_()
+
 
 
     def forward(self, x):
@@ -79,25 +78,25 @@ class LST1Block(nn.Module):
         if self.downsample is not None:
             y1 = self.downsample(residual)
 
-        y2 = self.conv1(residual)
+        y2 = F.conv2d(residual, self.weight1)
         y2 = self.bn1(y2)
-        y2 = self.activation(y2)
-
-        y2 = F.conv2d(y2, self.weight2)
-        y2 = self.bn2(y2)
         y2 = F.softshrink(y2, self.tau)
 
-        w = self.weight3.repeat(self.base_chnls, 1, 1, 1)
+        w = self.weight2.repeat(self.out_chnls, 1, 1, 1)
         y2 = F.conv2d(y2,
                       w,
                       stride=self.stride,
                       padding=self.padding,
-                      groups=self.base_chnls)
+                      groups=self.out_chnls)
+        y2 = self.bn2(y2)
+        y2 = self.activation(y2)
+
+        y2 = self.conv3(y2)
         y2 = self.bn3(y2)
 
         y = y1 + y2
         y = F.softshrink(y, self.tau)
-        
+
         return y
 
 #LST-II bottleneck (default bottleneck used to construct LST-Net under ResNet/WRN architecture)
